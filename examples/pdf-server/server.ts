@@ -65,6 +65,11 @@ class FetchStandardFontDataFactory {
   }
 }
 import { z } from "zod";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { applyHeadlessCommands, type HeadlessCommand } from "./src/headless.js";
+
+const execFileAsync = promisify(execFile);
 
 // =============================================================================
 // Configuration
@@ -1270,6 +1275,7 @@ export interface CreateServerOptions {
   debug?: boolean;
 
   /**
+<<<<<<< HEAD
    * Register the view's actions as separate app tools (navigate, search,
    * add_annotations, ...) instead of the default single `interact` app
    * tool. Hosts that ask the user to approve each app tool separately
@@ -1279,6 +1285,12 @@ export interface CreateServerOptions {
    * HTML, where src/mcp-app.ts reads it before connecting.
    */
   splitAppTools?: boolean;
+=======
+   * Prefer headless `annotate_pdf` over the MCP App viewer for annotations.
+   * When true, `display_pdf` still works but docs steer models to annotate_pdf.
+   */
+  headless?: boolean;
+>>>>>>> bab8101 (feat(pdf-server): add headless annotate_pdf tool and CLI flag)
 }
 
 // Module-level singletons so they survive across createServer() calls — in
@@ -1292,6 +1304,7 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
   const { enableInteract = false, useClientRoots = false } = options;
   const debug = options.debug ?? false;
   const splitAppTools = options.splitAppTools ?? false;
+  const headless = options.headless ?? false;
   const disableInteract = !enableInteract;
   const server = new McpServer({ name: "PDF Server", version: "2.0.0" });
 
@@ -1387,6 +1400,159 @@ export function createServer(options: CreateServerOptions = {}): McpServer {
           truncated,
         },
       };
+    },
+  );
+
+  const HeadlessCommandSchema = z.object({
+    action: z.enum([
+      "highlight_text",
+      "add_annotations",
+      "get_text",
+      "clear_annotations",
+      "add_legend",
+    ]),
+    page: z.number().min(1).optional(),
+    query: z.string().optional(),
+    color: z.string().optional(),
+    content: z
+      .string()
+      .optional()
+      .describe("Persisted /Contents — Preview sidebar (⌘⌥4)"),
+    matchIndex: z
+      .number()
+      .min(0)
+      .optional()
+      .describe(
+        "Which occurrence (0=first). Default 0 when allMatches is false",
+      ),
+    allMatches: z
+      .boolean()
+      .optional()
+      .describe("Highlight every match on the page. Default false"),
+    section: z
+      .string()
+      .optional()
+      .describe(
+        'Only search inside this section header until the next (e.g. "Fundamentals" or "1 · Fundamentals")',
+      ),
+    sectionEnd: z
+      .string()
+      .optional()
+      .describe("Explicit end header; default = next numbered section"),
+    afterText: z
+      .string()
+      .optional()
+      .describe("Match must appear after this text"),
+    beforeText: z
+      .string()
+      .optional()
+      .describe("Match must appear before this text"),
+    annotations: z.array(z.record(z.string(), z.any())).optional(),
+    lines: z.array(z.string()).optional(),
+    title: z.string().optional(),
+  });
+
+  // Tool: annotate_pdf — headless highlight/annotate (no viewer iframe)
+  server.tool(
+    "annotate_pdf",
+    headless
+      ? `Write PDF highlights/annotations directly to a local file — no viewer required.
+
+Use this instead of display_pdf + interact when the MCP App viewer fails to load.
+After calling, open the file in your browser (file://…) and refresh to see highlights.
+
+Actions: highlight_text (query + optional page), add_annotations (manual rects in model coords), get_text.`
+      : `Write PDF highlights/annotations directly to a local file without the MCP App viewer.
+
+After calling, open the returned filePath in a browser tab (file://…) and refresh.`,
+    {
+      url: z
+        .string()
+        .describe(
+          "Local PDF path or file:// URL (must be under allowed roots)",
+        ),
+      commands: z
+        .array(HeadlessCommandSchema)
+        .min(1)
+        .describe("Headless commands to apply sequentially"),
+      openAfter: z
+        .boolean()
+        .default(false)
+        .describe(
+          "On macOS, run `open` on the file after writing (browser/Preview)",
+        ),
+    },
+    async ({ url, commands, openAfter }): Promise<CallToolResult> => {
+      const normalized = isFileUrl(url) ? url : pathToFileUrl(url);
+      const validation = validateUrl(normalized);
+      if (!validation.valid) {
+        return {
+          content: [{ type: "text", text: validation.error! }],
+          isError: true,
+        };
+      }
+      const filePath = isFileUrl(normalized)
+        ? fileUrlToPath(normalized)
+        : decodeURIComponent(normalized);
+      const resolved = path.resolve(filePath);
+
+      if (!isWritablePath(resolved)) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `annotate_pdf refused: ${resolved} is not writable under allowed roots.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      try {
+        const result = await applyHeadlessCommands(
+          resolved,
+          commands as HeadlessCommand[],
+        );
+
+        if (openAfter && process.platform === "darwin") {
+          await execFileAsync("open", [resolved]);
+          result.messages.push(`opened ${resolved} via macOS open`);
+        }
+
+        const fileUrl = pathToFileUrl(resolved);
+        return {
+          content: [
+            {
+              type: "text",
+              text: [
+                `Headless annotations applied to ${resolved}`,
+                `file URL: ${fileUrl}`,
+                openAfter
+                  ? "Opened in default app — refresh the browser tab if already open."
+                  : "Open the file URL in a browser and refresh after each annotate_pdf call.",
+                ...result.messages,
+              ].join("\n"),
+            },
+          ],
+          structuredContent: {
+            filePath: resolved,
+            fileUrl,
+            highlightsAdded: result.highlightsAdded,
+            annotationsAdded: result.annotationsAdded,
+            messages: result.messages,
+          },
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `annotate_pdf failed: ${err instanceof Error ? err.message : String(err)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
     },
   );
 

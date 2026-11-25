@@ -96,6 +96,7 @@ function parseArgs(): {
   stdio: boolean;
   useClientRoots: boolean;
   enableInteract: boolean;
+  headless: boolean;
   debug: boolean;
   splitAppTools: boolean;
 } {
@@ -104,6 +105,7 @@ function parseArgs(): {
   let stdio = false;
   let useClientRoots = false;
   let enableInteract = false;
+  let headless = false;
   let debug = false;
   let splitAppTools = false;
 
@@ -113,11 +115,9 @@ function parseArgs(): {
     } else if (arg === "--use-client-roots") {
       useClientRoots = true;
     } else if (arg === "--enable-interact") {
-      // Force-enable interact for HTTP mode. Only use when running a
-      // single long-lived server process (e.g. the e2e test harness) —
-      // the command queue is in-memory per-process, so stateless
-      // multi-instance deployments will drop commands.
       enableInteract = true;
+    } else if (arg === "--headless") {
+      headless = true;
     } else if (arg === "--debug") {
       debug = true;
     } else if (arg === "--split-app-tools") {
@@ -150,13 +150,14 @@ function parseArgs(): {
     stdio,
     useClientRoots,
     enableInteract,
+    headless,
     debug,
     splitAppTools,
   };
 }
 
 async function main() {
-  const { urls, stdio, useClientRoots, enableInteract, debug, splitAppTools } =
+  const { urls, stdio, useClientRoots, enableInteract, headless, debug, splitAppTools } =
     parseArgs();
 
   // Register local files in whitelist
@@ -179,14 +180,17 @@ async function main() {
     }
   }
 
-  console.error(`[pdf-server] Ready (${urls.length} URL(s) configured)`);
+  console.error(
+    `[pdf-server] Ready (${urls.length} URL(s) configured)${headless ? " [headless annotate_pdf enabled]" : ""}`,
+  );
 
   if (stdio) {
     // stdio → client is local (e.g. Claude Desktop), roots are safe
     await startStdioServer(() =>
       createServer({
-        enableInteract: true,
+        enableInteract: !headless,
         useClientRoots: true,
+        headless,
         debug,
         splitAppTools,
       }),
@@ -200,7 +204,7 @@ async function main() {
       );
     }
     await startStreamableHTTPServer(() =>
-      createServer({ useClientRoots, enableInteract, debug, splitAppTools }),
+      createServer({ useClientRoots, enableInteract, headless, debug, splitAppTools }),
     );
   }
 }
